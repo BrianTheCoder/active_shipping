@@ -86,13 +86,13 @@ class CanadaPostTest < Test::Unit::TestCase
   end
   
   def test_non_success_parse_rate_response
-    assert_raise ActiveMerchant::Shipping::ResponseError do
-      @carrier.expects(:ssl_post).returns(@bad_response)
+    @carrier.expects(:ssl_post).returns(@bad_response)
+
+    error = assert_raise ActiveMerchant::Shipping::ResponseError do
       rate_estimates = @carrier.find_rates(@origin, @destination, @line_items)
-      
-      assert_equal [], rate_estimates.rates
-      assert_equal [], rate_estimates.boxes
     end
+
+    assert_equal 'Parcel too heavy to be shipped with CPC.', error.message
   end
 
   def test_turn_around_time_default
@@ -142,5 +142,10 @@ class CanadaPostTest < Test::Unit::TestCase
     rate_estimates = @carrier.find_rates(@origin, @destination, @line_items)
 
     assert_equal [], rate_estimates.rates[0].delivery_range
+  end
+
+  def test_line_items_with_nil_values
+    @line_items << Package.new(500, [2, 3, 4], :description => "another box full of stuff", :value => nil)
+    @carrier.find_rates(@origin, @destination, @line_items)
   end
 end

@@ -52,12 +52,13 @@ module ActiveMerchant
 
       MAX_WEIGHT = 30 # kg
 
-      attr_accessor :language, :endpoint, :logger, :platform_id
+      attr_accessor :language, :endpoint, :logger, :platform_id, :customer_number
 
       def initialize(options = {})
         @language = LANGUAGE[options[:language]] || LANGUAGE['en']
         @endpoint = options[:endpoint] || ENDPOINT
         @platform_id = options[:platform_id]
+        @customer_number = options[:customer_number]
         super(options)
       end
       
@@ -237,10 +238,12 @@ module ActiveMerchant
       # rating
 
       def build_rates_request(origin, destination, line_items = [], options = {}, package = nil, services = [])
+        line_items = Array(line_items)
         xml =  XmlNode.new('mailing-scenario', :xmlns => "http://www.canadapost.ca/ws/ship/rate") do |node|
           node << customer_number_node(options)
           node << contract_id_node(options)
           node << quote_type_node(options)
+          node << expected_mailing_date_node(shipping_date(options)) if options[:shipping_date]
           options_node = shipping_options_node(RATES_OPTIONS, options)
           node << options_node if options_node && !options_node.children.count.zero?
           node << parcel_node(line_items, package)
@@ -328,9 +331,9 @@ module ActiveMerchant
       # :show_postage_rate
       # :cod, :cod_amount, :insurance, :insurance_amount, :signature_required, :pa18, :pa19, :hfp, :dns, :lad
       # 
-      def build_shipment_request(origin_hash, destination_hash, package, line_items = [], options = {})
-        origin = Location.new(sanitize_zip(origin_hash))
-        destination = Location.new(sanitize_zip(destination_hash))
+      def build_shipment_request(origin, destination, package, line_items = [], options = {})
+        origin = sanitize_location(origin)
+        destination = sanitize_location(destination)
 
         xml = XmlNode.new('non-contract-shipment', :xmlns => "http://www.canadapost.ca/ws/ncshipment") do |root_node|
           root_node << XmlNode.new('delivery-spec') do |node|
@@ -616,7 +619,7 @@ module ActiveMerchant
       end
 
       def customer_number_node(options)
-        XmlNode.new("customer-number", options[:customer_number])
+        XmlNode.new("customer-number", options[:customer_number] || customer_number)
       end
 
       def contract_id_node(options)
@@ -625,6 +628,10 @@ module ActiveMerchant
 
       def quote_type_node(options)
         XmlNode.new("quote-type", 'commercial')
+      end
+
+      def expected_mailing_date_node(date_as_string)
+        XmlNode.new("expected-mailing-date", date_as_string)
       end
 
       def parcel_node(line_items, package = nil, options ={})
@@ -647,13 +654,13 @@ module ActiveMerchant
         end
       end
 
-      def origin_node(location_hash)
-        origin = Location.new(sanitize_zip(location_hash))
+      def origin_node(location)
+        origin = sanitize_location(location)
         XmlNode.new("origin-postal-code", origin.zip)
       end
 
-      def destination_node(location_hash)
-        destination = Location.new(sanitize_zip(location_hash))
+      def destination_node(location)
+        destination = sanitize_location(location)
         case destination.country_code
           when 'CA'
             XmlNode.new('destination') do |node|
@@ -727,6 +734,17 @@ module ActiveMerchant
         else
           expected_date = nil
         end
+        expected_date
+      end
+
+      def shipping_date(options)
+        DateTime.strptime((options[:shipping_date] || Time.now).to_s, "%Y-%m-%d")
+      end
+
+      def sanitize_location(location)
+        location_hash = location.is_a?(Location) ? location.to_hash : location
+        location_hash = sanitize_zip(location_hash)
+        Location.new(location_hash)
       end
 
       def sanitize_zip(hash)

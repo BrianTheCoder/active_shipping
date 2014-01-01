@@ -208,6 +208,9 @@ module ActiveMerchant
                   package_weight << XmlNode.new("UnitOfMeasurement") do |units|
                     units << XmlNode.new("Code", imperial ? 'LBS' : 'KGS')
                   end
+                if package.value.present? && package.currency.present?
+                  add_insured_node( package_node, currency:package.currency, value:(package.value.to_i/100) )
+                end
 
                   value = ((imperial ? package.lbs : package.kgs).to_f*1000).round/1000.0 # 3 decimals
                   package_weight << XmlNode.new("Weight", [value,0.1].max)
@@ -273,6 +276,21 @@ module ActiveMerchant
         end
       end
 
+      def add_insured_node(*args)
+        params, package_node = args.extract_options!, args[0]
+        currency, value = params[:currency], params[:value].to_i
+        package_node << XmlNode.new("PackageServiceOptions") do |package_service_options|
+          package_service_options << XmlNode.new("DeclaredValue") do |declared_value|
+            declared_value << XmlNode.new("CurrencyCode", currency)
+            declared_value << XmlNode.new("MonetaryValue", (value.to_i))
+          end
+          package_service_options << XmlNode.new("InsuredValue") do |declared_value|
+            declared_value << XmlNode.new("CurrencyCode", currency)
+            declared_value << XmlNode.new("MonetaryValue", (value.to_i))
+          end
+        end
+      end
+
       def parse_rate_response(origin, destination, packages, response, options={})
         rates = []
 
@@ -287,10 +305,10 @@ module ActiveMerchant
             service_code = rated_shipment.get_text('Service/Code').to_s
             days_to_delivery = rated_shipment.get_text('GuaranteedDaysToDelivery').to_s.to_i
             days_to_delivery = nil if days_to_delivery == 0
-
             rate_estimates << RateEstimate.new(origin, destination, @@name,
                                 service_name_for(origin, service_code),
                                 :total_price => rated_shipment.get_text('TotalCharges/MonetaryValue').to_s.to_f,
+                                :insurance_price => rated_shipment.get_text('ServiceOptionsCharges/MonetaryValue').to_s.to_f,
                                 :currency => rated_shipment.get_text('TotalCharges/CurrencyCode').to_s,
                                 :service_code => service_code,
                                 :packages => packages,
@@ -307,7 +325,7 @@ module ActiveMerchant
         message = response_message(xml)
 
         if success
-          tracking_number, origin, destination, status_code, status_description = nil
+          tracking_number, origin, destination, status_code, status_description, delivery_signature = nil
           delivered, exception = false
           exception_event = nil
           shipment_events = []
@@ -374,6 +392,7 @@ module ActiveMerchant
 
             # Has the shipment been delivered?
             if status == :delivered
+              delivery_signature = activities.first.get_text('ActivityLocation/SignedForByName').to_s
               if !destination
                 destination = shipment_events[-1].location
               end
@@ -389,6 +408,7 @@ module ActiveMerchant
           :status => status,
           :status_code => status_code,
           :status_description => status_description,
+          :delivery_signature => delivery_signature,
           :scheduled_delivery_date => scheduled_delivery_date,
           :shipment_events => shipment_events,
           :delivered => delivered,

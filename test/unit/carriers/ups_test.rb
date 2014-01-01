@@ -57,6 +57,11 @@ class UPSTest < Test::Unit::TestCase
     assert_equal 'delivered', @carrier.find_tracking_info('1Z5FX0076803466397').status_description.downcase
   end
 
+  def test_find_tracking_info_should_return_delivery_signature
+    @carrier.expects(:commit).returns(@tracking_response)
+    assert_equal 'MCAULEY', @carrier.find_tracking_info('1Z5FX0076803466397').delivery_signature
+  end
+
   def test_find_tracking_info_should_have_an_out_for_delivery_status
     out_for_delivery_tracking_response = xml_fixture('ups/out_for_delivery_shipment')
     @carrier.expects(:commit).returns(out_for_delivery_tracking_response)
@@ -131,6 +136,23 @@ class UPSTest < Test::Unit::TestCase
                    "UPS Next Day Air Early A.M.",
                    "UPS Next Day Air"], response.rates.map(&:service_name)
     assert_equal [992, 2191, 3007, 5509, 9401, 6124], response.rates.map(&:price)
+    assert_equal [0, 0, 0, 0, 0, 0], response.rates.map(&:negotiated_rate)
+  end
+
+  def test_response_with_insured_value
+    mock_response = xml_fixture('ups/test_real_home_as_residential_destination_response_with_insured')
+    @carrier.expects(:commit).returns(mock_response)
+    response = @carrier.find_rates( @locations[:beverly_hills],
+                                    @locations[:real_home_as_residential],
+                                    @packages.values_at(:declared_value))
+    assert_equal [ "UPS Ground",
+                   "UPS Three-Day Select",
+                   "UPS Second Day Air",
+                   "UPS Next Day Air Saver",
+                   "UPS Next Day Air Early A.M.",
+                   "UPS Next Day Air"], response.rates.map(&:service_name)
+    assert_equal [2254, 4002, 5107, 8726, 12730, 9430], response.rates.map(&:price)
+    assert_equal [850, 850, 850, 850, 850, 850], response.rates.map(&:insurance_price)
     assert_equal [0, 0, 0, 0, 0, 0], response.rates.map(&:negotiated_rate)
   end
 
