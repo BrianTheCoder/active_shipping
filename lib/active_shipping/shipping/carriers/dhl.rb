@@ -13,17 +13,15 @@ module ActiveMerchant
       def find_rates(origin, destination, packages, options = {})
         quote = build_rate_request(origin, destination, packages)
         response = ssl_post((test_mode? ? TEST_URL : LIVE_URL), quote.to_s)
-
         result = Hash.from_xml(response)['DCTResponse']['GetQuoteResponse']
 
         if result.key?('Note')
           condition = result['Note']['Condition']
-          parse_error(RateResponse, error, result)
           RateResponse.new(false, condition['ConditionData'], result, {
             test: test_mode?,
             status: :error,
             carrier: @@name,
-            status_description: msg,
+            status_description: condition['ConditionData'],
             error_code: condition['ConditionCode']
           })
         else
