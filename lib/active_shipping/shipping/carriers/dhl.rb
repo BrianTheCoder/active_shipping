@@ -14,7 +14,6 @@ module ActiveMerchant
         quote = build_rate_request(origin, destination, packages)
         response = ssl_post((test_mode? ? TEST_URL : LIVE_URL), quote.to_s)
         result = Hash.from_xml(response)['DCTResponse']['GetQuoteResponse']
-
         if result.key?('Note')
           condition = result['Note']['Condition']
           RateResponse.new(false, condition['ConditionData'], result, {
@@ -25,7 +24,7 @@ module ActiveMerchant
             error_code: condition['ConditionCode']
           })
         else
-          rate_details = result['BkgDetails']['QtdShp']
+          rate_details = [result['BkgDetails']['QtdShp']].flatten
           rates = rate_details.map do |details|
             next if details['ShippingCharge'].to_f == 0.0
             options = {
