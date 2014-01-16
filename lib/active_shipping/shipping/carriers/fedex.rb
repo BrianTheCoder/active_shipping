@@ -492,6 +492,9 @@ module ActiveMerchant
           root_node << XmlNode.new('AddressesToValidate') do |addr_validate|
             addr_validate << XmlNode.new('Address') do |addr|
               addr << XmlNode.new('StreetLines', location.address1)
+              if location.address2.present?
+                addr << XmlNode.new('StreetLines', location.address2)
+              end
               addr << XmlNode.new('City', location.city)
               addr << XmlNode.new('StateOrProvinceCode', location.state)
               addr << XmlNode.new('PostalCode', location.postal_code)
