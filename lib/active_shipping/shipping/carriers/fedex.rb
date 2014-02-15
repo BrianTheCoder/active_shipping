@@ -492,13 +492,20 @@ module ActiveMerchant
           root_node << XmlNode.new('AddressesToValidate') do |addr_validate|
             addr_validate << XmlNode.new('Address') do |addr|
               addr << XmlNode.new('StreetLines', location.address1)
-              if location.address2.present?
-                addr << XmlNode.new('StreetLines', location.address2)
-              end
               addr << XmlNode.new('City', location.city)
               addr << XmlNode.new('StateOrProvinceCode', location.state)
               addr << XmlNode.new('PostalCode', location.postal_code)
               addr << XmlNode.new('CountryCode', location.country)
+            end
+          end
+          if options.present?
+            root_node << XmlNode.new('AddressValidationOptions') do |addr_options|
+              addr_options << XmlNode.new('StreetAccuracy', options[:street_accuracy].to_s.upcase) if options[:street_accuracy].present?
+              addr_options << XmlNode.new('DirectionalAccuracy', options[:directional_accuracy].to_s.upcase) if options[:directional_accuracy].present?
+              addr_options << XmlNode.new('CompanyNameAccuracy', options[:company_name_accuracy].to_s.upcase) if options[:company_name_accuracy].present?
+              addr_options << XmlNode.new('ConvertToUpperCase', options[:convert_to_upper_case]) if options[:convert_to_upper_case].present?
+              addr_options << XmlNode.new('RecognizeAlternateCityName', options[:recognize_alternate_city_names]) if options[:recognize_alternate_city_names].present?
+              addr_options << XmlNode.new('ReturnParsedElements', options[:return_parsed_elements]) if options[:return_parsed_elements].present?
             end
           end
         end
