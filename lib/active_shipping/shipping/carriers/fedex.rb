@@ -169,7 +169,7 @@ module ActiveMerchant
 
         shipment_request = build_shipment_request(origin, destination, package, options)
 
-        xml = commit(save_request(tracking_request), (options[:test] || false))
+        xml = commit(save_request(shipment_request), (options[:test] || false))
         response = remove_version_prefix(xml)
 
         parse_shipping_response(response, options.merge(package: package))
@@ -180,7 +180,7 @@ module ActiveMerchant
 
         validation_request = build_validation_request(location, options)
 
-        xml = commit(save_request(tracking_request), (options[:test] || false))
+        xml = commit(save_request(validation_request), (options[:test] || false))
         response = remove_version_prefix(xml)
 
         parse_validation_response(response, options)
