@@ -169,7 +169,8 @@ module ActiveMerchant
 
         shipment_request = build_shipment_request(origin, destination, package, options)
 
-        response = commit(save_request(shipment_request), (options[:test] || false)).gsub(/<(\/)?.*?\:(.*?)>/, '<\1\2>')
+        xml = commit(save_request(tracking_request), (options[:test] || false))
+        response = remove_version_prefix(xml)
 
         parse_shipping_response(response, options.merge(package: package))
       end
@@ -178,7 +179,9 @@ module ActiveMerchant
         options = @options.update(options)
 
         validation_request = build_validation_request(location, options)
-        response = commit(save_request(validation_request), options[:test] || false).gsub(/<\?.*\?>/, "").strip.gsub(/<(\/)?.*?\:(.*?)>/, '<\1\2>')
+
+        xml = commit(save_request(tracking_request), (options[:test] || false))
+        response = remove_version_prefix(xml)
 
         parse_validation_response(response, options)
       end
