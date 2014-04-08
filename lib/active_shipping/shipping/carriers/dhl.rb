@@ -24,9 +24,8 @@ module ActiveMerchant
             error_code: condition['ConditionCode']
           })
         else
-          rate_details = [result['BkgDetails']['QtdShp']].flatten
+          rate_details = [result['BkgDetails']['QtdShp']].flatten.reject {|details| details['ShippingCharge'].to_f == 0.0 }
           rates = rate_details.map do |details|
-            next if details['ShippingCharge'].to_f == 0.0
             options = {
               :shipping_date => Date.parse(details['PickupDate']),
               :service_code => details['LocalProductCode'],
