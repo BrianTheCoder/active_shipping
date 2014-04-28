@@ -5,6 +5,7 @@ module ActiveMerchant
       @@name = "DHL"
 
       TEST_URL = "http://xmlpitest-ea.dhl.com/XMLShippingServlet"
+      LIVE_URL = "https://xmlpi-ea.dhl.com/XMLShippingServlet"
 
       def requirements
         [:site_id, :password]
