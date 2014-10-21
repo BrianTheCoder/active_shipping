@@ -84,6 +84,7 @@ module ActiveMerchant #:nodoc:
       def residential?; @address_type == 'residential' end
       def commercial?; @address_type == 'commercial' end
       def po_box?; @address_type == 'po_box' end
+      def unknown?; country_code == 'ZZ' end
 
       def address_type=(value)
         return unless value.present?
@@ -141,6 +142,10 @@ module ActiveMerchant #:nodoc:
         else
           nil
         end
+      end
+
+      def address2_and_3
+        [address2, address3].reject(&:blank?).join(", ")
       end
 
     end

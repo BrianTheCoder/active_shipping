@@ -71,6 +71,17 @@ class ShipmentPackerTest < Test::Unit::TestCase
     end
   end
 
+def test_raise_over_weight_exceptions_before_over_package_limit_exceptions
+    assert_raises(ShipmentPacker::OverweightItem) do
+      items = [{:grams => 5, :quantity => ShipmentPacker::EXCESS_PACKAGE_QUANTITY_THRESHOLD + 1, :price => 1.0}]
+      ShipmentPacker.pack(items, @dimensions, 4, 'USD')
+    end
+  end
+
+  def test_returns_an_empty_list_when_no_items_provided
+    assert_equal [], ShipmentPacker.pack([], @dimensions, 1, 'USD')
+  end
+
   def test_add_summarized_prices_for_all_items_and_currency_to_package
     items = [
       {:grams => 1, :quantity => 3, :price => 1.0},
@@ -120,5 +131,46 @@ class ShipmentPackerTest < Test::Unit::TestCase
     package = packages.first
     assert_equal 1, package.weight
     assert_equal 100, package.value
+  end
+
+  def test_excess_packages
+    assert_raises(ShipmentPacker::ExcessPackageQuantity) do
+      items = [{:grams => 1, :quantity => ShipmentPacker::EXCESS_PACKAGE_QUANTITY_THRESHOLD + 1, :price => 1.0}]
+      ShipmentPacker.pack(items, @dimensions, 1, 'USD')
+    end
+  end
+
+  def test_lots_of_zero_weight_items
+    items = [{:grams => 0, :quantity => 1_000_000, :price => 1.0}]
+    packages = ShipmentPacker.pack(items, @dimensions, 1, 'USD')
+
+    assert_equal 1, packages.size
+    assert_equal 0, packages[0].grams
+    assert_equal 100_000_000, packages[0].value
+  end
+
+  def test_dont_destroy_input_items
+    items = [{:grams => 1, :quantity => 5, :price => 1.0}]
+
+    packages = ShipmentPacker.pack(items, @dimensions, 10, 'USD')
+
+    assert_equal 1, items.size
+    assert_equal 1, packages.size
+  end
+
+  def test_dont_modify_input_item_quantities
+    items = [{:grams => 1, :quantity => 5, :price => 1.0}]
+
+    packages = ShipmentPacker.pack(items, @dimensions, 10, 'USD')
+
+    assert_equal 5, items.first[:quantity]
+  end
+
+  def test_items_with_negative_weight
+    items = [{:grams => -1, :quantity => 5, :price => 1.0}]
+
+    packages = ShipmentPacker.pack(items, @dimensions, 10, 'USD')
+
+    assert_equal 5, items.first[:quantity]
   end
 end

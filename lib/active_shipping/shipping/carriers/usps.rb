@@ -3,51 +3,72 @@ require 'cgi'
 
 module ActiveMerchant
   module Shipping
-    
+
     # After getting an API login from USPS (looks like '123YOURNAME456'),
     # run the following test:
-    # 
+    #
     # usps = USPS.new(:login => '123YOURNAME456', :test => true)
     # usps.valid_credentials?
     #
     # This will send a test request to the USPS test servers, which they ask you
     # to do before they put your API key in production mode.
     class USPS < Carrier
+      EventDetails = Struct.new(:description, :time, :zoneless_time, :location)
+      EVENT_MESSAGE_PATTERNS = [
+        /^(.*), (\w+ \d{1,2}, \d{4}, \d{1,2}:\d\d [ap]m), (.*), (\w\w) (\d{5})$/i,
+        /^Your item \w{2,3} (out for delivery|delivered) at (\d{1,2}:\d\d [ap]m on \w+ \d{1,2}, \d{4}) in (.*), (\w\w) (\d{5})\.$/i
+      ]
       self.retry_safe = true
-      
+
       cattr_reader :name
       @@name = "USPS"
-      
+
       LIVE_DOMAIN = 'production.shippingapis.com'
       LIVE_RESOURCE = 'ShippingAPI.dll'
-      
+
       TEST_DOMAINS = { #indexed by security; e.g. TEST_DOMAINS[USE_SSL[:rates]]
         true => 'secure.shippingapis.com',
         false => 'testing.shippingapis.com'
       }
-      
+
       TEST_RESOURCE = 'ShippingAPITest.dll'
-      
+
       API_CODES = {
         :us_rates => 'RateV4',
         :world_rates => 'IntlRateV2',
-        :test => 'CarrierPickupAvailability'
+        :test => 'CarrierPickupAvailability',
+        :track => 'TrackV2'
       }
       USE_SSL = {
         :us_rates => false,
         :world_rates => false,
-        :test => true
+        :test => true,
+        :track => false
       }
+
       CONTAINERS = {
-        :envelope => 'Flat Rate Envelope',
-        :box => 'Flat Rate Box'
+        rectangular: 'RECTANGULAR',
+        variable: 'VARIABLE',
+        box: 'FLAT RATE BOX',
+        box_large: 'LG FLAT RATE BOX',
+        box_medium: 'MD FLAT RATE BOX',
+        box_small: 'SM FLAT RATE BOX',
+        envelope: 'FLAT RATE ENVELOPE',
+        envelope_legal: 'LEGAL FLAT RATE ENVELOPE',
+        envelope_padded: 'PADDED FLAT RATE ENVELOPE',
+        envelope_gift_card: 'GIFT CARD FLAT RATE ENVELOPE',
+        envelope_window: 'WINDOW FLAT RATE ENVELOPE',
+        envelope_small: 'SM FLAT RATE ENVELOPE',
+        package_service: 'PACKAGE SERVICE'
       }
+
       MAIL_TYPES = {
         :package => 'Package',
         :postcard => 'Postcards or aerogrammes',
         :matter_for_the_blind => 'Matter for the blind',
         :envelope => 'Envelope'
       }
+
       PACKAGE_PROPERTIES = {
         'ZipOrigination' => :origin_zip,
         'ZipDestination' => :destination_zip,
@@ -72,7 +93,25 @@ module ActiveMerchant
         :parcel => 'PARCEL',
         :media => 'MEDIA',
         :library => 'LIBRARY',
+        :online => 'ONLINE',
+        :plus => 'PLUS',
         :all => 'ALL'
+      }
+      DEFAULT_SERVICE = Hash.new(:all).update(
+        :base => :online,
+        :plus => :plus
+      )
+      DOMESTIC_RATE_FIELD = Hash.new('Rate').update(
+        :base => 'CommercialRate',
+        :plus => 'CommercialPlusRate'
+      )
+      INTERNATIONAL_RATE_FIELD = Hash.new('Postage').update(
+        :base => 'CommercialPostage',
+        :plus => 'CommercialPlusPostage'
+      )
+      COMMERCIAL_FLAG_NAME = {
+        :base => 'CommercialFlag',
+        :plus => 'CommercialPlusFlag'
       }
       FIRST_CLASS_MAIL_TYPES = {
         :letter => 'LETTER',
@@ -81,8 +120,10 @@ module ActiveMerchant
         :post_card => 'POSTCARD',
         :package_service => 'PACKAGESERVICE'
       }
-      
-      # TODO: get rates for "U.S. possessions and Trust Territories" like Guam, etc. via domestic rates API: http://www.usps.com/ncsc/lookups/abbr_state.txt
+
+      # Array of U.S. possessions according to USPS: https://www.usps.com/ship/official-abbreviations.htm
+      US_POSSESSIONS = ["AS", "FM", "GU", "MH", "MP", "PW", "PR", "VI"]
+
       # TODO: figure out how USPS likes to say "Ivory Coast"
       #
       # Country names:
@@ -119,6 +160,29 @@ module ActiveMerchant
         "WS" => "Western Samoa"
       }
 
+      STATUS_NODE_PATTERNS = %w(
+        Error/Description
+        */TrackInfo/Error/Description
+      )
+
+      RESPONSE_ERROR_MESSAGES = [
+        /There is no record of that mail item/,
+        /This Information has not been included in this Test Server\./,
+        /Delivery status information is not available/
+      ]
+
+      ESCAPING_AND_SYMBOLS = /&amp;lt;\S*&amp;gt;/
+      LEADING_USPS = /^USPS/
+      TRAILING_ASTERISKS = /\*+$/
+      SERVICE_NAME_SUBSTITUTIONS = /#{ESCAPING_AND_SYMBOLS}|#{LEADING_USPS}|#{TRAILING_ASTERISKS}/
+
+      def find_tracking_info(tracking_number, options={})
+        options = @options.update(options)
+        tracking_request = build_tracking_request(tracking_number, options)
+        response = commit(:track, tracking_request, (options[:test] || false))
+        parse_tracking_response(response, options)
+      end
+
       def self.size_code_for(package)
         if package.inches(:max) <= 12
           'REGULAR'
@@ -126,9 +190,9 @@ module ActiveMerchant
           'LARGE'
         end
       end
-      
+
       # from info at http://www.usps.com/businessmail101/mailcharacteristics/parcels.htm
-      # 
+      #
       # package.options[:books] -- 25 lb. limit instead of 35 for books or other printed matter.
       #                             Defaults to false.
       def self.package_machinable?(package, options={})
@@ -142,68 +206,90 @@ module ActiveMerchant
                             package.pounds <= (package.options[:books] ? 25.0 : 35.0)
         at_least_minimum && at_most_maximum
       end
-      
+
       def requirements
         [:login]
       end
-      
+
       def find_rates(origin, destination, packages, options = {})
         options = @options.merge(options)
-        
+
         origin = Location.from(origin)
         destination = Location.from(destination)
         packages = Array(packages)
-        
+
         #raise ArgumentError.new("USPS packages must originate in the U.S.") unless ['US',nil].include?(origin.country_code(:alpha2))
-        
-        
+
         # domestic or international?
-        
-        response = if ['US',nil].include?(destination.country_code(:alpha2))
+
+        domestic_codes = US_POSSESSIONS + ['US', nil]
+        response = if domestic_codes.include?(destination.country_code(:alpha2))
           us_rates(origin, destination, packages, options)
         else
           world_rates(origin, destination, packages, options)
         end
       end
-      
+
       def valid_credentials?
         # Cannot test with find_rates because USPS doesn't allow that in test mode
         test_mode? ? canned_address_verification_works? : super
       end
-      
+
       def maximum_weight
         Mass.new(70, :pounds)
       end
-      
+
+      def extract_event_details(message)
+        return EventDetails.new unless EVENT_MESSAGE_PATTERNS.any?{|pattern| message =~ pattern}
+        description = $1.upcase
+        timestamp = $2
+        city = $3
+        state = $4
+        zip_code = $5
+
+        time = Time.parse(timestamp)
+        zoneless_time = Time.utc(time.year, time.month, time.mday, time.hour, time.min, time.sec)
+        location = Location.new(city: city, state: state, postal_code: zip_code, country: 'USA')
+        EventDetails.new($1.upcase, time, zoneless_time, location)
+      end
+
       protected
-      
+
+      def build_tracking_request(tracking_number, options={})
+        xml_request = XmlNode.new('TrackRequest', 'USERID' => @options[:login]) do |root_node|
+          root_node << XmlNode.new('TrackID', :ID => tracking_number)
+        end
+        URI.encode(xml_request.to_s)
+      end
+
       def us_rates(origin, destination, packages, options={})
         request = build_us_rate_request(packages, origin.zip, destination.zip, options)
          # never use test mode; rate requests just won't work on test servers
         parse_rate_response origin, destination, packages, commit(:us_rates,request,false), options
       end
-      
+
       def world_rates(origin, destination, packages, options={})
-        request = build_world_rate_request(packages, destination)
+        request = build_world_rate_request(packages, destination, options)
          # never use test mode; rate requests just won't work on test servers
         parse_rate_response origin, destination, packages, commit(:world_rates,request,false), options
       end
-      
+
       # Once the address verification API is implemented, remove this and have valid_credentials? build the request using that instead.
       def canned_address_verification_works?
+        return false unless @options[:login]
         request = "%3CCarrierPickupAvailabilityRequest%20USERID=%22#{URI.encode(@options[:login])}%22%3E%20%0A%3CFirmName%3EABC%20Corp.%3C/FirmName%3E%20%0A%3CSuiteOrApt%3ESuite%20777%3C/SuiteOrApt%3E%20%0A%3CAddress2%3E1390%20Market%20Street%3C/Address2%3E%20%0A%3CUrbanization%3E%3C/Urbanization%3E%20%0A%3CCity%3EHouston%3C/City%3E%20%0A%3CState%3ETX%3C/State%3E%20%0A%3CZIP5%3E77058%3C/ZIP5%3E%20%0A%3CZIP4%3E1234%3C/ZIP4%3E%20%0A%3C/CarrierPickupAvailabilityRequest%3E%0A"
         # expected_hash = {"CarrierPickupAvailabilityResponse"=>{"City"=>"HOUSTON", "Address2"=>"1390 Market Street", "FirmName"=>"ABC Corp.", "State"=>"TX", "Date"=>"3/1/2004", "DayOfWeek"=>"Monday", "Urbanization"=>nil, "ZIP4"=>"1234", "ZIP5"=>"77058", "CarrierRoute"=>"C", "SuiteOrApt"=>"Suite 777"}}
         xml = REXML::Document.new(commit(:test, request, true))
         xml.get_text('/CarrierPickupAvailabilityResponse/City').to_s == 'HOUSTON' &&
         xml.get_text('/CarrierPickupAvailabilityResponse/Address2').to_s == '1390 Market Street'
       end
-      
+
       # options[:service] --    One of [:first_class, :priority, :express, :bpm, :parcel,
-      #                          :media, :library, :all]. defaults to :all.
-      # options[:container] --  One of [:envelope, :box]. defaults to neither (this field has
-      #                          special meaning in the USPS API).
+      #                          :media, :library, :online, :plus, :all]. defaults to :all.
       # options[:books] --      Either true or false. Packages of books or other printed matter
       #                          have a lower weight limit to be considered machinable.
+      # package.options[:container] --  Can be :rectangular, :variable, or a flat rate container
+      #                                 defined in CONTAINERS.
       # package.options[:machinable] -- Either true or false. Overrides the detection of
       #                                  "machinability" entirely.
       def build_us_rate_request(packages, origin_zip, destination_zip, options={})
@@ -211,8 +297,16 @@ module ActiveMerchant
         request = XmlNode.new('RateV4Request', :USERID => @options[:login]) do |rate_request|
           packages.each_with_index do |p,id|
             rate_request << XmlNode.new('Package', :ID => id.to_s) do |package|
-              package << XmlNode.new('Service', US_SERVICES[options[:service] || :all])
-              package << XmlNode.new('FirstClassMailType', FIRST_CLASS_MAIL_TYPES[options[:first_class_mail_type]])
+              commercial_type = commercial_type(options)
+              default_service = DEFAULT_SERVICE[commercial_type]
+              service         = options.fetch(:service, default_service).to_sym
+
+              if commercial_type && service != default_service
+                raise ArgumentError, "Commercial #{commercial_type} rates are only provided with the #{default_service.inspect} service."
+              end
+
+              package << XmlNode.new('Service', US_SERVICES[service])
+              package << XmlNode.new('FirstClassMailType', FIRST_CLASS_MAIL_TYPES[options[:first_class_mail_type].try(:to_sym)])
               package << XmlNode.new('ZipOrigination', strip_zip(origin_zip))
               package << XmlNode.new('ZipDestination', strip_zip(destination_zip))
               package << XmlNode.new('Pounds', 0)
@@ -234,17 +328,17 @@ module ActiveMerchant
         end
         URI.encode(save_request(request.to_s))
       end
-      
+
       # important difference with international rate requests:
       # * services are not given in the request
       # * package sizes are not given in the request
       # * services are returned in the response along with restrictions of size
       # * the size restrictions are returned AS AN ENGLISH SENTENCE (!?)
       #
-      # 
+      #
       # package.options[:mail_type] -- one of [:package, :postcard, :matter_for_the_blind, :envelope].
       #                                 Defaults to :package.
-      def build_world_rate_request(packages, destination)
+      def build_world_rate_request(packages, destination, options)
         country = COUNTRY_NAME_CONVERSIONS[destination.country.code(:alpha2).value] || destination.country.name
         request = XmlNode.new('IntlRateV2Request', :USERID => @options[:login]) do |rate_request|
           packages.each_index do |id|
@@ -272,19 +366,22 @@ module ActiveMerchant
               package << XmlNode.new('Length', "%0.2f" % [p.inches(:length), 0.01].max)
               package << XmlNode.new('Height', "%0.2f" % [p.inches(:height), 0.01].max)
               package << XmlNode.new('Girth', "%0.2f" % [p.inches(:girth), 0.01].max)
+              if commercial_type = commercial_type(options)
+                package << XmlNode.new(COMMERCIAL_FLAG_NAME.fetch(commercial_type), 'Y')
+              end
             end
           end
         end
         URI.encode(save_request(request.to_s))
       end
-      
+
       def parse_rate_response(origin, destination, packages, response, options={})
         success = true
         message = ''
         rate_hash = {}
-        
+
         xml = REXML::Document.new(response)
-        
+
         if error = xml.elements['/Error']
           success = false
           message = error.elements['Description'].text
@@ -296,17 +393,17 @@ module ActiveMerchant
               break
             end
           end
-          
+
           if success
-            rate_hash = rates_from_response_node(xml, packages)
+            rate_hash = rates_from_response_node(xml, packages, options)
             unless rate_hash
               success = false
               message = "Unknown root node in XML response: '#{xml.root.name}'"
             end
           end
-          
+
         end
-        
+
         if success
           rate_estimates = rate_hash.keys.map do |service_name|
             RateEstimate.new(origin,destination,@@name,"USPS #{service_name}",
@@ -317,32 +414,28 @@ module ActiveMerchant
           rate_estimates.reject! {|e| e.package_count != packages.length}
           rate_estimates = rate_estimates.sort_by(&:total_price)
         end
-        
+
         RateResponse.new(success, message, Hash.from_xml(response), :rates => rate_estimates, :xml => response, :request => last_request)
       end
-      
-      def rates_from_response_node(response_node, packages)
+
+      def rates_from_response_node(response_node, packages, options = {})
         rate_hash = {}
         return false unless (root_node = response_node.elements['/IntlRateV2Response | /RateV4Response'])
-        domestic = (root_node.name == 'RateV4Response')
-        
-        domestic_elements = ['Postage', 'CLASSID', 'MailService', 'Rate']
-        international_elements = ['Service', 'ID', 'SvcDescription', 'Postage']
-        service_node, service_code_node, service_name_node, rate_node = domestic ? domestic_elements : international_elements
-        
+
+        commercial_type = commercial_type(options)
+        service_node, service_code_node, service_name_node, rate_node = if root_node.name == 'RateV4Response'
+          %w[Postage CLASSID MailService] << DOMESTIC_RATE_FIELD[commercial_type]
+        else
+          %w[Service ID SvcDescription]   << INTERNATIONAL_RATE_FIELD[commercial_type]
+        end
+
         root_node.each_element('Package') do |package_node|
           this_package = packages[package_node.attributes['ID'].to_i]
-          
+
           package_node.each_element(service_node) do |service_response_node|
             service_name = service_response_node.get_text(service_name_node).to_s
 
-            # strips the double-escaped HTML for trademark symbols from service names
-            service_name.gsub!(/&amp;lt;\S*&amp;gt;/,'')
-            # ...leading "USPS"
-            service_name.gsub!(/^USPS/,'')
-            # ...trailing asterisks
-            service_name.gsub!(/\*+$/,'')
-            # ...surrounding spaces
+            service_name.gsub!(SERVICE_NAME_SUBSTITUTIONS,'')
             service_name.strip!
 
             # aggregate specific package rates into a service-centric RateEstimate
@@ -353,18 +446,18 @@ module ActiveMerchant
             package_rates = this_service[:package_rates] ||= []
             this_package_rate = {:package => this_package,
                                  :rate => Package.cents_from(service_response_node.get_text(rate_node).to_s.to_f)}
-            
+
             package_rates << this_package_rate if package_valid_for_service(this_package,service_response_node)
           end
         end
         rate_hash
       end
-      
+
       def package_valid_for_service(package, service_node)
         return true if service_node.elements['MaxWeight'].nil?
         max_weight = service_node.get_text('MaxWeight').to_s.to_f
         name = service_node.get_text('SvcDescription | MailService').to_s.downcase
-        
+
         if name =~ /flat.rate.box/ #domestic or international flat rate box
           # flat rate dimensions from http://www.usps.com/shipping/flatrate.htm
           return (package_valid_for_max_dimensions(package,
@@ -390,7 +483,7 @@ module ActiveMerchant
           #
           # 'Max. length 46", width 35", height 46" and max. length plus girth 108"'
           # 'Max. length 24", Max. length, height, depth combined 36"'
-          # 
+          #
           sentence = CGI.unescapeHTML(service_node.get_text('MaxDimensions').to_s)
           tokens = sentence.downcase.split(/[^\d]*"/).reject {|t| t.empty?}
           max_dimensions = {:weight => max_weight}
@@ -398,7 +491,7 @@ module ActiveMerchant
           tokens.each do |token|
             axis_sum = [/length/,/width/,/height/,/depth/].sum {|regex| (token =~ regex) ? 1 : 0}
             unless axis_sum == 0
-              value = token[/\d+$/].to_f 
+              value = token[/\d+$/].to_f
               if axis_sum == 3
                 max_dimensions[:length_plus_width_plus_height] = value
               elsif token =~ /girth/ and axis_sum == 1
@@ -415,7 +508,7 @@ module ActiveMerchant
           return package_valid_for_max_dimensions(package, max_dimensions)
         end
       end
-      
+
       def package_valid_for_max_dimensions(package,dimensions)
         valid = ((not ([:length,:width,:height].map {|dim| dimensions[dim].nil? || dimensions[dim].to_f >= package.inches(dim).to_f}.include?(false))) and
                 (dimensions[:weight].nil? || dimensions[:weight] >= package.pounds) and
@@ -428,22 +521,119 @@ module ActiveMerchant
 
         return valid
       end
-      
+
+      def parse_tracking_response(response, options)
+        actual_delivery_date, status = nil
+        xml = REXML::Document.new(response)
+        root_node = xml.elements['TrackResponse']
+
+        success = response_success?(xml)
+        message = response_message(xml)
+
+        if success
+          tracking_number, origin, destination = nil
+          shipment_events = []
+          tracking_details = xml.elements.collect('*/*/TrackDetail'){ |e| e }
+
+          tracking_summary = xml.elements.collect('*/*/TrackSummary'){ |e| e }.first
+          tracking_details << tracking_summary
+
+          tracking_number = root_node.elements['TrackInfo'].attributes['ID'].to_s
+
+          tracking_details.each do |event|
+            details = extract_event_details(event.get_text.to_s)
+            shipment_events << ShipmentEvent.new(details.description, details.zoneless_time, details.location) if details.location
+          end
+
+          shipment_events = shipment_events.sort_by(&:time)
+
+          if last_shipment = shipment_events.last
+            status = last_shipment.status
+            actual_delivery_date = last_shipment.time if last_shipment.delivered?
+          end
+        end
+
+        TrackingResponse.new(success, message, Hash.from_xml(response),
+          :carrier => @@name,
+          :xml => response,
+          :request => last_request,
+          :shipment_events => shipment_events,
+          :destination => destination,
+          :tracking_number => tracking_number,
+          :status => status,
+          :actual_delivery_date => actual_delivery_date
+        )
+      end
+
+      def track_summary_node(document)
+        document.elements['*/*/TrackSummary']
+      end
+
+      def error_description_node(document)
+        STATUS_NODE_PATTERNS.each do |pattern|
+          if node = document.elements[pattern]
+            return node
+          end
+        end
+      end
+
+      def response_status_node(document)
+         track_summary_node(document) || error_description_node(document)
+      end
+
+      def has_error?(document)
+        !!document.elements['Error']
+      end
+
+      def no_record?(document)
+        summary_node = track_summary_node(document)
+        if summary_node
+          summary = summary_node.get_text.to_s
+          RESPONSE_ERROR_MESSAGES.detect { |re| summary =~ re }
+          summary =~ /There is no record of that mail item/ || summary =~ /This Information has not been included in this Test Server\./
+        else
+          false
+        end
+      end
+
+      def tracking_info_error?(document)
+        document.elements['*/TrackInfo/Error']
+      end
+
+      def response_success?(document)
+        !(has_error?(document) || no_record?(document) || tracking_info_error?(document))
+      end
+
+      def response_message(document)
+        response_node = response_status_node(document)
+        response_node.get_text.to_s
+      end
+
       def commit(action, request, test = false)
         ssl_get(request_url(action, request, test))
       end
-      
+
       def request_url(action, request, test)
         scheme = USE_SSL[action] ? 'https://' : 'http://'
         host = test ? TEST_DOMAINS[USE_SSL[action]] : LIVE_DOMAIN
         resource = test ? TEST_RESOURCE : LIVE_RESOURCE
         "#{scheme}#{host}/#{resource}?API=#{API_CODES[action]}&XML=#{request}"
       end
-      
+
       def strip_zip(zip)
         zip.to_s.scan(/\d{5}/).first || zip
       end
-      
+
+      private
+
+      def commercial_type(options)
+        if options[:commercial_plus] == true
+          :plus
+        elsif options[:commercial_base] == true
+          :base
+        end
+      end
+
     end
   end
 end

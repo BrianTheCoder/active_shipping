@@ -52,12 +52,13 @@ module ActiveMerchant
 
       MAX_WEIGHT = 30 # kg
 
-      attr_accessor :language, :endpoint, :logger, :platform_id
+      attr_accessor :language, :endpoint, :logger, :platform_id, :customer_number
 
       def initialize(options = {})
         @language = LANGUAGE[options[:language]] || LANGUAGE['en']
         @endpoint = options[:endpoint] || ENDPOINT
         @platform_id = options[:platform_id]
+        @customer_number = options[:customer_number]
         super(options)
       end
       
@@ -78,7 +79,11 @@ module ActiveMerchant
         response = ssl_get(tracking_url(pin), headers(options, TRACK_MIMETYPE))
         parse_tracking_response(response)
       rescue ActiveMerchant::ResponseError, ActiveMerchant::Shipping::ResponseError => e
-        error_response(e.response.body, CPPWSTrackingResponse)
+        if e.response
+          error_response(e.response.body, CPPWSTrackingResponse)
+        else
+          CPPWSTrackingResponse.new(false, e.message, {}, {:carrier => @@name})
+        end
       rescue InvalidPinFormatError => e
         CPPWSTrackingResponse.new(false, "Invalid Pin Format", {}, {:carrier => @@name})
       end
@@ -237,10 +242,12 @@ module ActiveMerchant
       # rating
 
       def build_rates_request(origin, destination, line_items = [], options = {}, package = nil, services = [])
+        line_items = Array(line_items)
         xml =  XmlNode.new('mailing-scenario', :xmlns => "http://www.canadapost.ca/ws/ship/rate") do |node|
           node << customer_number_node(options)
           node << contract_id_node(options)
           node << quote_type_node(options)
+          node << expected_mailing_date_node(shipping_date(options)) if options[:shipping_date]
           options_node = shipping_options_node(RATES_OPTIONS, options)
           node << options_node if options_node && !options_node.children.count.zero?
           node << parcel_node(line_items, package)
@@ -286,11 +293,11 @@ module ActiveMerchant
         expected_date    = root_node.get_text('expected-delivery-date').to_s
         dest_postal_code = root_node.get_text('destination-postal-id').to_s
         destination      = Location.new(:postal_code => dest_postal_code)
-        origin           = Location.new({})        
+        origin           = Location.new(origin_hash_for(root_node))
         options = {
           :carrier                 => @@name,
           :service_name            => root_node.get_text('service-name').to_s,
-          :expected_date           => Date.parse(expected_date),
+          :expected_date           => expected_date.blank? ? nil : Date.parse(expected_date),
           :changed_date            => change_date.blank? ? nil : Date.parse(change_date),
           :change_reason           => root_node.get_text('changed-expected-delivery-reason').to_s.strip,
           :destination_postal_code => root_node.get_text('destination-postal-id').to_s,
@@ -328,9 +335,9 @@ module ActiveMerchant
       # :show_postage_rate
       # :cod, :cod_amount, :insurance, :insurance_amount, :signature_required, :pa18, :pa19, :hfp, :dns, :lad
       # 
-      def build_shipment_request(origin_hash, destination_hash, package, line_items = [], options = {})
-        origin = Location.new(sanitize_zip(origin_hash))
-        destination = Location.new(sanitize_zip(destination_hash))
+      def build_shipment_request(origin, destination, package, line_items = [], options = {})
+        origin = sanitize_location(origin)
+        destination = sanitize_location(destination)
 
         xml = XmlNode.new('non-contract-shipment', :xmlns => "http://www.canadapost.ca/ws/ncshipment") do |root_node|
           root_node << XmlNode.new('delivery-spec') do |node|
@@ -361,8 +368,7 @@ module ActiveMerchant
           node << XmlNode.new('contact-phone', location.phone)
           node << XmlNode.new('address-details') do |innernode|
             innernode << XmlNode.new('address-line-1', location.address1)
-            address2 = [location.address2, location.address3].reject(&:blank?).join(", ")
-            innernode << XmlNode.new('address-line-2', address2) unless address2.blank?
+            innernode << XmlNode.new('address-line-2', location.address2_and_3) unless location.address2_and_3.blank?
             innernode << XmlNode.new('city', location.city)
             innernode << XmlNode.new('prov-state', location.province)     
             #innernode << XmlNode.new('country-code', location.country_code)
@@ -378,8 +384,7 @@ module ActiveMerchant
           node << XmlNode.new('client-voice-number', location.phone)
           node << XmlNode.new('address-details') do |innernode|
             innernode << XmlNode.new('address-line-1', location.address1)
-            address2 = [location.address2, location.address3].reject(&:blank?).join(", ")
-            innernode << XmlNode.new('address-line-2', address2) unless address2.blank?
+            innernode << XmlNode.new('address-line-2', location.address2_and_3) unless location.address2_and_3.blank?
             innernode << XmlNode.new('city', location.city)
             innernode << XmlNode.new('prov-state', location.province) unless location.province.blank?
             innernode << XmlNode.new('country-code', location.country_code)
@@ -616,7 +621,7 @@ module ActiveMerchant
       end
 
       def customer_number_node(options)
-        XmlNode.new("customer-number", options[:customer_number])
+        XmlNode.new("customer-number", options[:customer_number] || customer_number)
       end
 
       def contract_id_node(options)
@@ -625,6 +630,10 @@ module ActiveMerchant
 
       def quote_type_node(options)
         XmlNode.new("quote-type", 'commercial')
+      end
+
+      def expected_mailing_date_node(date_as_string)
+        XmlNode.new("expected-mailing-date", date_as_string)
       end
 
       def parcel_node(line_items, package = nil, options ={})
@@ -647,13 +656,13 @@ module ActiveMerchant
         end
       end
 
-      def origin_node(location_hash)
-        origin = Location.new(sanitize_zip(location_hash))
+      def origin_node(location)
+        origin = sanitize_location(location)
         XmlNode.new("origin-postal-code", origin.zip)
       end
 
-      def destination_node(location_hash)
-        destination = Location.new(sanitize_zip(location_hash))
+      def destination_node(location)
+        destination = sanitize_location(location)
         case destination.country_code
           when 'CA'
             XmlNode.new('destination') do |node|
@@ -727,6 +736,17 @@ module ActiveMerchant
         else
           expected_date = nil
         end
+        expected_date
+      end
+
+      def shipping_date(options)
+        DateTime.strptime((options[:shipping_date] || Time.now).to_s, "%Y-%m-%d")
+      end
+
+      def sanitize_location(location)
+        location_hash = location.is_a?(Location) ? location.to_hash : location
+        location_hash = sanitize_zip(location_hash)
+        Location.new(location_hash)
       end
 
       def sanitize_zip(hash)
@@ -744,6 +764,24 @@ module ActiveMerchant
         return value == 0 ? 0.01 : value.round / 100.0
       end
 
+      def origin_hash_for(root_node)
+        occurrences = root_node.get_elements('significant-events').first.get_elements('occurrence')
+        earliest = occurrences.sort_by { |occurrence| time_of_occurrence occurrence }.first
+
+        {
+          city: earliest.get_text('event-site').to_s,
+          province: earliest.get_text('event-province').to_s,
+          address_1: earliest.get_text('event-retail-location-id').to_s,
+          country: 'Canada'
+        }
+      end
+
+      def time_of_occurrence(occurrence)
+        time = occurrence.get_text('event_time')
+        date = occurrence.get_text('event-date')
+        time_zone = occurrence.get_text('event-date')
+        DateTime.parse "#{date} #{time} #{time_zone}"
+      end
     end
 
     module CPPWSErrorResponse
@@ -753,20 +791,21 @@ module ActiveMerchant
       end
     end
 
-    class CPPWSRateResponse < RateResponse      
+    class CPPWSRateResponse < RateResponse
       include CPPWSErrorResponse
-      
+
       def initialize(success, message, params = {}, options = {})
         handle_error(message, options)
         super
       end
     end
-    
+
     class CPPWSTrackingResponse < TrackingResponse
+      DELIVERED_EVENT_CODES = %w(1496 1498 1499 1409 1410 1411 1412 1413 1414 1415 1416 1417 1418 1419 1420 1421 1422 1423 1424 1425 1426 1427 1428 1429 1430 1431 1432 1433 1434 1435 1436 1437 1438)
       include CPPWSErrorResponse
 
       attr_reader :service_name, :expected_date, :changed_date, :change_reason, :customer_number
-      
+
       def initialize(success, message, params = {}, options = {})
         handle_error(message, options)
         super
@@ -775,6 +814,21 @@ module ActiveMerchant
         @changed_date    = options[:changed_date]
         @change_reason   = options[:change_reason]
         @customer_number = options[:customer_number]
+      end
+
+      def delivered?
+        ! delivered_event.nil?
+      end
+
+      def actual_delivery_time
+        delivered_event.time if delivered?
+      end
+
+
+      private
+
+      def delivered_event
+        @delivered_event ||= @shipment_events.detect { |event| DELIVERED_EVENT_CODES.include? event.name }
       end
     end
 

@@ -35,9 +35,12 @@ class CanadaPostPwsRatingTest < Test::Unit::TestCase
                        :cod_method_of_payment => 'CSH', :cov => true, :cov_amount => 100.00, 
                        :so => true, :pa18 => true}
 
+    @customer_number = '654321'
+
     @cp = CanadaPostPWS.new(login)
     @cp.logger = Logger.new(STDOUT)
     @french_cp = CanadaPostPWS.new(login.merge(:language => 'fr'))
+    @cp_customer_number = CanadaPostPWS.new(login.merge(:customer_number => @customer_number))
 
     @default_options = {:customer_number => '123456'}
   end
@@ -84,10 +87,63 @@ class CanadaPostPwsRatingTest < Test::Unit::TestCase
     assert_equal "You cannot mail on behalf of the requested customer.", exception.message
   end
 
+  def test_find_rates_line_items_single_object
+    response = xml_fixture('canadapost_pws/rates_info')
+    expected_headers = {
+      'Authorization'   => "#{@cp.send(:encoded_authorization)}",
+      'Accept-Language' => 'en-CA',
+      'Accept'          => 'application/vnd.cpc.ship.rate+xml',
+      'Content-Type'    => 'application/vnd.cpc.ship.rate+xml'
+    }
+    CanadaPostPWS.any_instance.expects(:ssl_post).with(anything, anything, expected_headers).returns(response)
+
+    rates_response = @cp.find_rates(@home_params, @dest_params, @pkg1, @default_options)
+    
+    assert_equal 4, rates_response.rates.size
+    rate = rates_response.rates.first
+    assert_equal RateEstimate, rate.class
+    assert_equal "Canada Post PWS", rate.carrier
+    assert_equal @home.to_s, Location.new(rate.origin).to_s
+    assert_equal @dest.to_s, Location.new(rate.destination).to_s
+  end
+
   # build rates
 
   def test_build_rates_request
     xml = @cp.build_rates_request(@home_params, @dest_params, [@pkg1, @pkg2], @default_options)
+    doc = Nokogiri::HTML(xml)
+
+    assert_equal @default_options[:customer_number], doc.xpath('//customer-number').first.content
+    assert_equal 'K1P1J1', doc.xpath('//origin-postal-code').first.content
+    assert_equal 'united-states', doc.xpath('//destination').children.first.name
+    assert !doc.xpath('//parcel-characteristics').empty?
+    assert_equal "3.427", doc.xpath('//parcel-characteristics//weight').first.content
+  end
+
+  def test_build_rates_request_use_carrier_customer_number
+    xml = @cp_customer_number.build_rates_request(@home_params, @dest_params, [@pkg1, @pkg2])
+    doc = Nokogiri::HTML(xml)
+
+    assert_equal @customer_number, doc.xpath('//customer-number').first.content
+    assert_equal 'K1P1J1', doc.xpath('//origin-postal-code').first.content
+    assert_equal 'united-states', doc.xpath('//destination').children.first.name
+    assert !doc.xpath('//parcel-characteristics').empty?
+    assert_equal "3.427", doc.xpath('//parcel-characteristics//weight').first.content
+  end
+
+  def test_build_rates_request_override_carrier_customer_number
+    xml = @cp_customer_number.build_rates_request(@home_params, @dest_params, [@pkg1, @pkg2], @default_options)
+    doc = Nokogiri::HTML(xml)
+
+    assert_equal @default_options[:customer_number], doc.xpath('//customer-number').first.content
+    assert_equal 'K1P1J1', doc.xpath('//origin-postal-code').first.content
+    assert_equal 'united-states', doc.xpath('//destination').children.first.name
+    assert !doc.xpath('//parcel-characteristics').empty?
+    assert_equal "3.427", doc.xpath('//parcel-characteristics//weight').first.content
+  end
+
+  def test_build_rates_request_location_object
+    xml = @cp.build_rates_request(Location.new(@home_params), Location.new(@dest_params), [@pkg1, @pkg2], @default_options)
     doc = Nokogiri::HTML(xml)
 
     assert_equal @default_options[:customer_number], doc.xpath('//customer-number').first.content

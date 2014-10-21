@@ -1,6 +1,6 @@
 # Active Shipping
 
-![Build Status](https://travis-ci.org/Shopify/active_shipping.png)
+[![Build Status](https://travis-ci.org/Shopify/active_shipping.png)](https://travis-ci.org/Shopify/active_shipping)
 
 This library interfaces with the web services of various shipping carriers. The goal is to abstract the features that are most frequently used into a pleasant and consistent Ruby API. Active Shipping is an extension of [Active Merchant][], and as such, it borrows heavily from conventions used in the latter.
 
@@ -79,7 +79,7 @@ Active Shipping is currently being used and improved in a production environment
     
 ### Track a FedEx package
 
-    fedex = FedEx.new(:login => '999999999', :password => '7777777')
+    fedex = FedEx.new(:login => '999999999', :password => '7777777', key: '1BXXXXXXXXXxrcB', account: '51XXXXX20')
     tracking_info = fedex.find_tracking_info('tracking-number', :carrier_code => 'fedex_ground') # Ground package
     
     tracking_info.shipment_events.each do |event|
@@ -122,6 +122,17 @@ After you've pushed your well-tested changes to your github fork, make a pull re
 * Cody Fauser (<http://codyfauser.com>)
 * Jimmy Baker (<http://jimmyville.com/>)
 * William Lang (<http://williamlang.net/>)
+* Cameron Fowler
+* Christopher Saunders (<http://christophersaunders.ca>)
+* Denis Odorcic
+* Dennis O'Connor
+* Dennis Theisen
+* Edward Ocampo-Gooding
+* Isaac Kearse
+* John Duff
+* Nigel Ramsay
+* Philip Arndt
+* Vikram Oberoi
 
 ## Legal Mumbo Jumbo
 
